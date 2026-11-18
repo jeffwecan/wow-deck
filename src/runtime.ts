@@ -1,21 +1,18 @@
 import streamDeck from "@elgato/streamdeck";
-import { WowAction, keyboard, capture } from "./actions/wow-action.js";
-import { normalizeGrid } from "./settings/global-grid-settings.js";
-import { enablePhysicalPixels } from "./capture/window-manager.js";
+import { WowAction, deck, keyboard } from "./actions/wow-action.js";
+import { normalizeDeckSettings } from "./settings/deck-settings.js";
 
-enablePhysicalPixels();
 const action = new WowAction();
 streamDeck.actions.registerAction(action);
-streamDeck.settings.onDidReceiveGlobalSettings(ev => action.setGrid(normalizeGrid(ev.settings)));
+streamDeck.settings.onDidReceiveGlobalSettings(ev => deck.configure(normalizeDeckSettings(ev.settings)));
 streamDeck.devices.onDeviceDidDisconnect(() => keyboard.releaseAll());
-process.on("SIGINT", () => {
+const shutdown = () => {
     keyboard.releaseAll();
-    void capture.shutdown();
-});
-process.on("SIGTERM", () => {
-    keyboard.releaseAll();
-    void capture.shutdown();
-});
+    deck.stop();
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 process.on("exit", () => keyboard.releaseAll());
 await streamDeck.connect();
-action.setGrid(normalizeGrid(await streamDeck.settings.getGlobalSettings()));
+deck.configure(normalizeDeckSettings(await streamDeck.settings.getGlobalSettings()));
+deck.start();

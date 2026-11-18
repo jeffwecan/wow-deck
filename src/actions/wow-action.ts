@@ -1,141 +1,148 @@
 import streamDeck, {
     action,
     SingletonAction,
-    type WillAppearEvent,
-    type WillDisappearEvent,
-    type DidReceiveSettingsEvent,
+    type KeyAction,
     type KeyDownEvent,
     type KeyUpEvent,
-    type SendToPluginEvent
+    type SendToPluginEvent,
+    type DidReceiveSettingsEvent,
+    type WillAppearEvent,
+    type WillDisappearEvent
 } from "@elgato/streamdeck";
-import type { KeyAction } from "@elgato/streamdeck";
-import { normalizeAction, type ActionSettings } from "../settings/action-settings.js";
-import { normalizeGrid, sameGrid, type GridSettings } from "../settings/global-grid-settings.js";
+import path from "node:path";
+import { DeckSource } from "../deck/deck-source.js";
+import { IconResolver } from "../deck/icons.js";
+import { renderSlot, renderStatus } from "../deck/render.js";
 import { parseShortcut } from "../input/shortcut.js";
-import { listWindows, resolveWindow, windowDiscoveryStatus, foregroundWindowInfo } from "../capture/window-manager.js";
-import { CaptureManager } from "../capture/capture-manager.js";
 import { KeyboardManager } from "../input/keyboard-manager.js";
-import { fallbackSvg } from "../capture/image-processor.js";
+import { availableBars, describeSlot, normalizeAction, type ActionSettings } from "../settings/action-settings.js";
 
 const UUID = "com.wow-deck.button";
-export const capture = new CaptureManager();
+export const deck = new DeckSource();
 export const keyboard = new KeyboardManager();
+const icons = new IconResolver(path.join(process.cwd(), "cache", "icons"));
 
 @action({ UUID })
 export class WowAction extends SingletonAction<ActionSettings> {
     private settings = new Map<string, ActionSettings>();
     private lastImage = new Map<string, string>();
-    private statuses = new Map<string, string>();
-    private grid: GridSettings | null = null;
-    private pickTimer: ReturnType<typeof setTimeout> | null = null;
+    private renders = new Map<string, number>();
 
-    setGrid(grid: GridSettings) {
-        if (sameGrid(this.grid, grid)) {
-            // Re-binding would flash every key with a status card and restart nothing useful.
+    constructor() {
+        super();
+        deck.onChange(() => {
+            this.renderAll();
             this.sendInspector();
-            return;
-        }
-        this.grid = grid;
-        keyboard.releaseAll();
-        this.statuses.clear();
-        capture.setGrid(grid);
-
-        for (const key of this.actions) {
-            if (key.isKey()) {
-                this.bind(key);
-            }
-        }
-        this.sendInspector();
+        });
     }
 
-    private sendInspector(includeWindows = false) {
+    /** The key a button presses: its manual shortcut, else the key the addon exported for its slot. */
+    private keyFor(settings: ActionSettings): string | null {
+        if (settings.shortcut) {
+            return settings.shortcut;
+        }
+        return deck.export?.slots.get(settings.slot)?.key ?? null;
+    }
+
+    private renderAll() {
+        for (const key of this.actions) {
+            if (key.isKey()) {
+                void this.render(key);
+            }
+        }
+    }
+
+    private async render(key: KeyAction<ActionSettings>) {
+        const token = (this.renders.get(key.id) ?? 0) + 1;
+        this.renders.set(key.id, token);
+        const settings = this.settings.get(key.id) ?? normalizeAction(null);
+        const data = deck.export;
+        let image: string;
+        try {
+            if (!settings.slot) {
+                image = await renderStatus("WoW", "Choose a slot");
+            }
+            else if (!data) {
+                image = await renderStatus("WoW", "Install addon, then /reload");
+            }
+            else {
+                const slot = data.slots.get(settings.slot);
+                if (!slot) {
+                    image = await renderStatus("Empty", `Slot ${settings.slot}`);
+                }
+                else {
+                    const icon = await icons.get(slot);
+                    image = await renderSlot(icon, slot.name, this.keyFor(settings));
+                }
+            }
+        }
+        catch (error) {
+            streamDeck.logger.warn("Could not render key", error);
+            return;
+        }
+        // A newer render for this key started while we waited for the icon.
+        if (this.renders.get(key.id) !== token || this.lastImage.get(key.id) === image) {
+            return;
+        }
+        this.lastImage.set(key.id, image);
+        await key.setImage(image);
+    }
+
+    private sendInspector() {
         const id = streamDeck.ui.action?.id;
         if (!id) {
             return;
         }
-        const settings = this.settings.get(id);
-        const status
-            = settings?.shortcut && !parseShortcut(settings.shortcut)
-                ? "Invalid shortcut"
-                : this.statuses.get(id) || capture.currentStatus;
-        const windows = includeWindows ? listWindows(true) : null;
+        const settings = this.settings.get(id) ?? normalizeAction(null);
+        const data = deck.export;
+        const slot = data?.slots.get(settings.slot);
+        const key = this.keyFor(settings);
+        const bars = availableBars(data?.bars);
         void streamDeck.ui.sendToPropertyInspector({
             type: "state",
-            status,
-            ...(windows
-                ? {
-                    windowDiagnostic: windowDiscoveryStatus(),
-                    windows: windows.map(w => ({
-                        title: w.title,
-                        process: w.processName,
-                        handle: w.handle
-                    }))
-                }
-                : {})
-        });
-    }
-
-    private bind(key: KeyAction<ActionSettings>) {
-        const settings = this.settings.get(key.id) ?? normalizeAction(null);
-        this.lastImage.delete(key.id);
-        if (settings.shortcut && !parseShortcut(settings.shortcut)) {
-            capture.unsubscribe(key.id);
-            this.statuses.set(key.id, "Invalid shortcut");
-            void key.setImage(fallbackSvg("Invalid shortcut"));
-            return;
-        }
-        capture.subscribe(key.id, {
-            position: settings.position,
-            live: settings.live,
-            update: async (image, status) => {
-                if (this.lastImage.get(key.id) !== image) {
-                    await key.setImage(image);
-                    this.lastImage.set(key.id, image);
-                }
-                if (this.statuses.get(key.id) !== status) {
-                    this.statuses.set(key.id, status);
-                    if (streamDeck.ui.action?.id === key.id) {
-                        this.sendInspector();
-                    }
-                }
-            }
+            status: deck.status,
+            character: data?.character ?? "",
+            characters: data?.characters ?? [],
+            updated: data?.updated ?? 0,
+            bars: bars.map(bar => ({ name: bar.name, first: bar.first })),
+            slotLabel: describeSlot(settings.slot, bars),
+            slot: slot
+                ? { name: slot.name, kind: slot.kind, key: slot.key, keySource: slot.keySource }
+                : null,
+            effectiveKey: key,
+            keyValid: !key || !!parseShortcut(key)
         });
     }
 
     override onWillAppear(ev: WillAppearEvent<ActionSettings>) {
         this.settings.set(ev.action.id, normalizeAction(ev.payload.settings));
         if (ev.action.isKey()) {
-            this.bind(ev.action);
+            void this.render(ev.action);
         }
     }
 
     override onWillDisappear(ev: WillDisappearEvent<ActionSettings>) {
         keyboard.release(ev.action.id);
-        capture.unsubscribe(ev.action.id);
         this.settings.delete(ev.action.id);
-        this.statuses.delete(ev.action.id);
         this.lastImage.delete(ev.action.id);
+        this.renders.delete(ev.action.id);
     }
 
     override onDidReceiveSettings(ev: DidReceiveSettingsEvent<ActionSettings>) {
         keyboard.release(ev.action.id);
-        const settings = normalizeAction(ev.payload.settings);
-        this.settings.set(ev.action.id, settings);
+        this.settings.set(ev.action.id, normalizeAction(ev.payload.settings));
         if (ev.action.isKey()) {
-            this.bind(ev.action);
+            void this.render(ev.action);
         }
         this.sendInspector();
     }
 
     override onKeyDown(ev: KeyDownEvent<ActionSettings>) {
         const settings = this.settings.get(ev.action.id) ?? normalizeAction(ev.payload.settings);
-        if (!settings.live) {
-            capture.refresh(ev.action.id);
+        const key = this.keyFor(settings);
+        if (key) {
+            keyboard.press(ev.action.id, key);
         }
-        if (!parseShortcut(settings.shortcut)) {
-            return;
-        }
-        keyboard.press(ev.action.id, settings.shortcut, this.grid ? resolveWindow(this.grid) : null);
     }
 
     override onKeyUp(ev: KeyUpEvent<ActionSettings>) {
@@ -143,78 +150,13 @@ export class WowAction extends SingletonAction<ActionSettings> {
     }
 
     override onPropertyInspectorDidAppear() {
-        this.sendInspector(true);
+        this.sendInspector();
     }
 
     override onSendToPlugin(ev: SendToPluginEvent<{ type: string }, ActionSettings>) {
-        if (!ev.payload || typeof ev.payload !== "object" || Array.isArray(ev.payload)) {
-            return;
-        }
-        if (ev.payload.type === "refresh") {
-            this.sendInspector(true);
-        }
-        if (ev.payload.type === "preview") {
-            void (async () => {
-                try {
-                    const preview = await capture.preview();
-                    await streamDeck.ui.sendToPropertyInspector(
-                        preview
-                            ? { type: "preview", ...preview }
-                            : {
-                                type: "previewError",
-                                message:
-                                      "No captured frame yet. Save the target window, wait a moment, and try again."
-                            }
-                    );
-                }
-                catch (error) {
-                    streamDeck.logger.warn("Could not make window preview", error);
-                    await streamDeck.ui.sendToPropertyInspector({
-                        type: "previewError",
-                        message: "Could not make a window preview. Check the plugin log."
-                    });
-                }
-            })();
-        }
-        if (ev.payload.type === "pickForeground") {
-            if (this.pickTimer) {
-                clearTimeout(this.pickTimer);
-            }
-            this.pickTimer = setTimeout(() => {
-                this.pickTimer = null;
-                void (async () => {
-                    const window = foregroundWindowInfo();
-                    if (!window) {
-                        streamDeck.logger.warn("No foreground window was accessible after the picker countdown");
-                        await streamDeck.ui.sendToPropertyInspector({
-                            type: "pickResult",
-                            message: "No active window was available"
-                        });
-                        return;
-                    }
-                    const next = {
-                        ...(this.grid ?? normalizeGrid(null)),
-                        windowProcess: window.processName,
-                        windowTitle: window.title,
-                        windowHandle: window.handle
-                    };
-                    try {
-                        await streamDeck.settings.setGlobalSettings(next);
-                        this.setGrid(next);
-                        await streamDeck.ui.sendToPropertyInspector({
-                            type: "pickResult",
-                            message: `Selected ${window.processName}. Shared grid saved.`
-                        });
-                    }
-                    catch (error) {
-                        streamDeck.logger.error("Could not save picked window", error);
-                        await streamDeck.ui.sendToPropertyInspector({
-                            type: "pickResult",
-                            message: "Could not save the selected window"
-                        });
-                    }
-                })();
-            }, 3000);
+        if (ev.payload && typeof ev.payload === "object" && ev.payload.type === "refresh") {
+            deck.rescan();
+            this.sendInspector();
         }
     }
 }

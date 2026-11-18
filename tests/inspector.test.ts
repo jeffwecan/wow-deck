@@ -10,40 +10,17 @@ class FakeOption {
 }
 class FakeElement {
     value = "";
-    checked = true;
     textContent = "";
-    src = "";
-    hidden = false;
-    style: Record<string, string> = { color: "" };
+    disabled = false;
     options: FakeOption[] = [];
     onchange?: () => void;
-    onclick?: (event?: { clientX: number; clientY: number }) => void;
-    oninput?: () => void;
-    onkeydown?: (event: {
-        key: string;
-        ctrlKey?: boolean;
-        altKey?: boolean;
-        metaKey?: boolean;
-        preventDefault(): void;
-    }) => void;
-
-    onkeyup?: (event: { key: string; preventDefault(): void }) => void;
-    onblur?: () => void;
+    onclick?: () => void;
     replaceChildren() {
         this.options = [];
     }
 
     add(option: FakeOption) {
         this.options.push(option);
-    }
-
-    focus() {}
-    checkValidity() {
-        return true;
-    }
-
-    getBoundingClientRect() {
-        return { left: 0, top: 0, width: 200, height: 100 };
     }
 }
 class FakeSocket {
@@ -61,175 +38,117 @@ class FakeSocket {
     }
 }
 
+function load(settings: Record<string, unknown>) {
+    const elements = new Map<string, FakeElement>();
+    const get = (id: string) => {
+        if (!elements.has(id)) {
+            elements.set(id, new FakeElement());
+        }
+        return elements.get(id)!;
+    };
+    const browser: Record<string, unknown> = {};
+    runInNewContext(readFileSync(new URL("../inspector/index.js", import.meta.url), "utf8"), {
+        window: browser,
+        document: { getElementById: get },
+        WebSocket: FakeSocket,
+        Option: FakeOption
+    });
+    (browser.connectElgatoStreamDeckSocket as (...args: string[]) => void)(
+        "1234",
+        "pi-uuid",
+        "registerPropertyInspector",
+        "{}",
+        JSON.stringify({ action: "com.wow-deck.button", payload: { settings } })
+    );
+    const socket = FakeSocket.last;
+    socket.onopen?.();
+    const receive = (message: unknown) => socket.onmessage?.({ data: JSON.stringify(message) });
+    return { get, socket, receive };
+}
+
 describe("Property Inspector protocol", () => {
-    it("uses the inspector UUID to save each action and global grid", () => {
-        const elements = new Map<string, FakeElement>();
-        const get = (id: string) => {
-            if (!elements.has(id)) {
-                elements.set(id, new FakeElement());
-            }
-            return elements.get(id)!;
-        };
-        const browser: Record<string, unknown> = {};
-        runInNewContext(readFileSync(new URL("../inspector/index.js", import.meta.url), "utf8"), {
-            window: browser,
-            document: { getElementById: get, addEventListener() {} },
-            WebSocket: FakeSocket,
-            Option: FakeOption,
-            setTimeout() {},
-            clearTimeout() {}
+    it("shows the saved slot and saves a newly picked bar button", () => {
+        const { get, socket } = load({ slot: 63, shortcut: "" });
+        expect(socket.messages[0]).toEqual({ event: "registerPropertyInspector", uuid: "pi-uuid" });
+        expect(socket.messages.find(m => m.event === "sendToPlugin")).toMatchObject({
+            context: "pi-uuid",
+            payload: { type: "refresh" }
         });
-        const connect = browser.connectElgatoStreamDeckSocket as (...args: string[]) => void;
-        connect(
-            "1234",
-            "pi-uuid",
-            "registerPropertyInspector",
-            "{}",
-            JSON.stringify({
-                action: "com.wow-deck.button",
-                payload: { settings: { mirror: false } }
-            })
-        );
-        const socket = FakeSocket.last;
-        socket.onopen?.();
-        expect(socket.messages.find(m => m.event === "sendToPlugin")?.context).toBe("pi-uuid");
-        get("position").value = "2-3";
-        get("position").onchange?.();
-        const actionSave = socket.messages.find(m => m.event === "setSettings");
-        expect(actionSave?.context).toBe("pi-uuid");
-        expect(actionSave?.payload).toMatchObject({ position: "2-3" });
-        expect(actionSave?.payload).toMatchObject({ live: true });
-        expect(actionSave?.payload).not.toHaveProperty("mirror");
-        expect(get("status").textContent).toBe("Saving button settings…");
-        socket.onmessage?.({
-            data: JSON.stringify({
-                event: "didReceiveSettings",
-                payload: { settings: actionSave?.payload }
-            })
+        expect(get("bar").value).toBe("61");
+        expect(get("button").value).toBe("3");
+
+        get("bar").value = "25";
+        get("bar").onchange?.();
+        expect(socket.messages.at(-1)).toMatchObject({
+            event: "setSettings",
+            context: "pi-uuid",
+            action: "com.wow-deck.button",
+            payload: { slot: 25, shortcut: "" }
         });
-        expect(get("status").textContent).toBe("Button settings saved");
-        get("live").checked = false;
-        get("live").onchange?.();
-        expect(socket.messages.at(-1)?.payload).toMatchObject({ live: false });
-        socket.onmessage?.({
-            data: JSON.stringify({
-                event: "didReceiveGlobalSettings",
-                payload: { settings: { hashChangeDetection: false, debugLogging: true } }
-            })
-        });
-        get("windowProcess").value = "notepad.exe";
-        get("saveGrid").onclick?.();
-        const gridSave = socket.messages.find(m => m.event === "setGlobalSettings");
-        expect(gridSave?.context).toBe("pi-uuid");
-        expect(gridSave?.payload).not.toHaveProperty("hashChangeDetection");
-        expect(gridSave?.payload).not.toHaveProperty("debugLogging");
-        socket.onmessage?.({
-            data: JSON.stringify({
-                event: "didReceiveGlobalSettings",
-                payload: { settings: gridSave?.payload }
-            })
-        });
-        expect(get("status").textContent).toBe("Shared grid settings saved");
-        socket.onmessage?.({
-            data: JSON.stringify({
-                event: "sendToPropertyInspector",
-                payload: {
-                    type: "state",
-                    status: "Mirroring",
-                    windows: [{ process: "chrome.exe", title: "Browser", handle: 42 }]
-                }
-            })
-        });
-        const listedWindows = get("window").options.length;
-        socket.onmessage?.({
-            data: JSON.stringify({
-                event: "sendToPropertyInspector",
-                payload: { type: "state", status: "Mirroring" }
-            })
-        });
-        expect(get("window").options).toHaveLength(listedWindows);
+
+        get("button").value = "12";
+        get("shortcut").value = " SHIFT-F6 ";
+        get("button").onchange?.();
+        expect(socket.messages.at(-1)?.payload).toEqual({ slot: 36, shortcut: "SHIFT-F6" });
     });
 
-    it("sets and saves the shared origin from a preview click", () => {
-        const elements = new Map<string, FakeElement>();
-        const get = (id: string) => {
-            if (!elements.has(id)) {
-                elements.set(id, new FakeElement());
+    it("lists the bars the addon found, including bars 7 and 8", () => {
+        const { get, socket, receive } = load({ slot: 160 });
+        expect(get("bar").value).toBe("0"); // not in the fallback list until the plugin answers
+        receive({
+            event: "sendToPropertyInspector",
+            payload: {
+                type: "state",
+                status: "Using Jeff-Forever",
+                bars: [
+                    { name: "Main bar", first: 1 },
+                    { name: "Action bar 7", first: 157 },
+                    { name: "Action bar 8", first: 169 }
+                ],
+                characters: []
             }
-            return elements.get(id)!;
-        };
-        const browser: Record<string, unknown> = {};
-        runInNewContext(readFileSync(new URL("../inspector/index.js", import.meta.url), "utf8"), {
-            window: browser,
-            document: { getElementById: get, addEventListener() {} },
-            WebSocket: FakeSocket,
-            Option: FakeOption,
-            setTimeout() {},
-            clearTimeout() {}
         });
-        const connect = browser.connectElgatoStreamDeckSocket as (...args: string[]) => void;
-        connect(
-            "1234",
-            "pi-uuid",
-            "registerPropertyInspector",
-            "{}",
-            JSON.stringify({
-                action: "com.wow-deck.button",
-                payload: { settings: {} }
-            })
-        );
-        const socket = FakeSocket.last;
-        socket.onopen?.();
-        socket.onmessage?.({
-            data: JSON.stringify({
-                event: "didReceiveGlobalSettings",
-                payload: {
-                    settings: { windowProcess: "chrome.exe", windowHandle: 42 }
-                }
-            })
+        expect(get("bar").options.map(o => o.label)).toEqual(["Choose…", "Main bar", "Action bar 7", "Action bar 8"]);
+        expect(get("bar").value).toBe("157");
+        expect(get("button").value).toBe("4");
+
+        get("bar").value = "169";
+        get("bar").onchange?.();
+        expect(socket.messages.at(-1)?.payload).toEqual({ slot: 169, shortcut: "" });
+    });
+
+    it("describes what the slot presses and saves the deck settings", () => {
+        const { get, socket, receive } = load({ slot: 61 });
+        receive({ event: "didReceiveGlobalSettings", payload: { settings: { wowFolder: "D:\\WoW", character: "" } } });
+        expect(get("wowFolder").value).toBe("D:\\WoW");
+        receive({
+            event: "sendToPropertyInspector",
+            payload: {
+                type: "state",
+                status: "Using Jeff-Forever",
+                character: "Jeff-Forever",
+                characters: ["Alt-Forever", "Jeff-Forever"],
+                slotLabel: "Bottom left bar, button 1",
+                slot: { name: "Polymorph", kind: "macro", key: "CTRL-ALT-SHIFT-F1", keySource: "deck" },
+                effectiveKey: "CTRL-ALT-SHIFT-F1",
+                keyValid: true
+            }
         });
-        get("showPreview").onclick?.();
-        expect(socket.messages.at(-1)?.payload).toMatchObject({ type: "preview" });
-        socket.onmessage?.({
-            data: JSON.stringify({
-                event: "sendToPropertyInspector",
-                payload: {
-                    type: "preview",
-                    dataUrl: "data:image/jpeg;base64,abc",
-                    frameWidth: 1000,
-                    frameHeight: 500,
-                    client: { x: 10, y: 20, width: 980, height: 460 },
-                    windowHandle: 42
-                }
-            })
+        expect(get("status").textContent).toBe("Using Jeff-Forever");
+        expect(get("slotInfo").textContent).toContain("Polymorph (macro)");
+        expect(get("slotInfo").textContent).toContain("Presses CTRL-ALT-SHIFT-F1, from deck chord set by the addon");
+        expect(get("character").options.map(o => o.label)).toEqual([
+            "Last played (Jeff-Forever)",
+            "Alt-Forever",
+            "Jeff-Forever"
+        ]);
+
+        get("character").value = "Alt-Forever";
+        get("character").onchange?.();
+        expect(socket.messages.at(-1)).toMatchObject({
+            event: "setGlobalSettings",
+            context: "pi-uuid",
+            payload: { wowFolder: "D:\\WoW", character: "Alt-Forever" }
         });
-        expect(get("previewWrap").hidden).toBe(false);
-        const before = socket.messages.length;
-        get("previewImage").onclick?.({ clientX: 1, clientY: 1 });
-        expect(socket.messages).toHaveLength(before);
-        get("previewImage").onclick?.({ clientX: 100, clientY: 50 });
-        const saved = socket.messages.at(-1);
-        expect(saved?.event).toBe("setGlobalSettings");
-        expect(saved?.payload).toMatchObject({ originX: 490, originY: 230 });
-        const afterClick = socket.messages.length;
-        const arrow = (key: string) => ({ key, preventDefault() {} });
-        get("previewWrap").onkeydown?.(arrow("ArrowRight"));
-        get("previewWrap").onkeydown?.(arrow("ArrowRight"));
-        get("previewWrap").onkeydown?.(arrow("ArrowUp"));
-        expect(socket.messages).toHaveLength(afterClick);
-        get("previewWrap").onkeyup?.(arrow("ArrowUp"));
-        expect(socket.messages.at(-1)?.payload).toMatchObject({
-            originX: 492,
-            originY: 229
-        });
-        expect(socket.messages).toHaveLength(afterClick + 1);
-        get("previewImage").onclick?.({ clientX: 2, clientY: 4 });
-        const atEdge = socket.messages.length;
-        get("previewWrap").onkeydown?.(arrow("ArrowLeft"));
-        get("previewWrap").onkeydown?.(arrow("ArrowUp"));
-        get("previewWrap").onkeyup?.(arrow("ArrowUp"));
-        expect(socket.messages).toHaveLength(atEdge);
-        expect(get("originX").value).toBe(0);
-        expect(get("originY").value).toBe(0);
     });
 });

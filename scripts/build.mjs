@@ -16,7 +16,7 @@ await build({
     banner: {
         js: "import { createRequire } from \"node:module\"; const require = createRequire(import.meta.url);"
     },
-    external: ["@screen-capture/node", "koffi", "sharp"]
+    external: ["koffi", "sharp"]
 });
 await cp("manifest.json", path.join(root, "manifest.json"));
 await mkdir(path.join(root, "assets"), { recursive: true });
@@ -41,8 +41,6 @@ await writeFile(
     "{\"type\":\"module\",\"private\":true}"
 );
 for (const name of [
-    "@screen-capture/node",
-    "@screen-capture/node-win32-x64-msvc",
     "koffi",
     "@koromix/koffi-win32-x64",
     "sharp",
