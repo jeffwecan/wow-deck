@@ -2,7 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import { CaptureManager } from "../src/capture/capture-manager.js";
 import { normalizeGrid } from "../src/settings/global-grid-settings.js";
 
-const captureTrace = vi.hoisted(() => ({ crops: [] as number[][] }));
+// Sessions are tracked per instance: a previous test's session can finish stopping late.
+const captureTrace = vi.hoisted(() => ({
+    crops: [] as number[][],
+    sessions: [] as { stopped: boolean }[],
+    get starts() {
+        return this.sessions.length;
+    },
+    get stops() {
+        return this.sessions.filter(session => session.stopped).length;
+    }
+}));
 
 vi.mock("@elgato/streamdeck", () => ({
     default: { logger: { info() {}, warn() {} } }
@@ -36,7 +46,10 @@ vi.mock("@screen-capture/node", () => {
             }
         }
 
+        private record = { stopped: false };
+
         async start() {
+            captureTrace.sessions.push(this.record);
             const makeFrame = (red: number): Frame => {
                 const buffer = Buffer.alloc(96 * 48 * 4);
                 for (let i = 0; i < buffer.length; i += 4) {
@@ -86,6 +99,7 @@ vi.mock("@screen-capture/node", () => {
         }
 
         async stop() {
+            this.record.stopped = true;
             this.pending?.(undefined);
             this.pending = null;
         }
@@ -167,6 +181,90 @@ describe("capture interval", () => {
             manager.refresh("button");
             await refreshed;
             expect(captureTrace.crops).toHaveLength(2);
+        }
+        finally {
+            await manager.shutdown();
+        }
+    });
+});
+
+describe("capture session reuse", () => {
+    const grid = { ...normalizeGrid(null), windowProcess: "test.exe", captureInterval: 100 as const };
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const reset = () => {
+        captureTrace.crops.length = 0;
+        captureTrace.sessions.length = 0;
+    };
+    const firstImage = (manager: CaptureManager, id: string, live: boolean, images: string[] = []) =>
+        new Promise<string>((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error(`No frame for ${id}`)), 1200);
+            manager.subscribe(id, {
+                position: "1-1",
+                live,
+                update: async (image) => {
+                    images.push(image);
+                    if (image.startsWith("data:image/png")) {
+                        clearTimeout(timeout);
+                        resolve(image);
+                    }
+                }
+            });
+        });
+
+    it("keeps the session through a brief disappearance, then stops it once idle", async () => {
+        reset();
+        const manager = new CaptureManager(300);
+        manager.setGrid(grid);
+        try {
+            await firstImage(manager, "button", true);
+            manager.unsubscribe("button");
+            await sleep(50);
+
+            const images: string[] = [];
+            await firstImage(manager, "button", true, images);
+            expect(images[0]).toMatch(/^data:image\/png/); // cached image, no status card
+            expect(captureTrace.starts).toBe(1);
+            expect(captureTrace.stops).toBe(0);
+
+            manager.unsubscribe("button");
+            await sleep(500);
+            expect(captureTrace.stops).toBe(1);
+        }
+        finally {
+            await manager.shutdown();
+        }
+    });
+
+    it("does not restart capture when the same grid arrives again", async () => {
+        reset();
+        const manager = new CaptureManager(300);
+        manager.setGrid(grid);
+        try {
+            await firstImage(manager, "button", true);
+            manager.setGrid({ ...grid });
+            manager.setGrid(normalizeGrid({ ...grid }));
+            await sleep(100);
+            expect(captureTrace.starts).toBe(1);
+            expect(captureTrace.stops).toBe(0);
+        }
+        finally {
+            await manager.shutdown();
+        }
+    });
+
+    it("refreshes a non-live button from the running session without restarting it", async () => {
+        reset();
+        const manager = new CaptureManager(300);
+        manager.setGrid(grid);
+        try {
+            await firstImage(manager, "live", true);
+            await firstImage(manager, "static", false);
+            const crops = captureTrace.crops.length;
+            manager.refresh("static");
+            await sleep(50);
+            expect(captureTrace.crops.length).toBe(crops + 1);
+            expect(captureTrace.starts).toBe(1);
+            expect(captureTrace.stops).toBe(0);
         }
         finally {
             await manager.shutdown();

@@ -57,17 +57,39 @@ let discoveryStatus = "Window discovery has not run";
 export function windowDiscoveryStatus() {
     return discoveryStatus;
 }
+// resolveWindow() runs on every captured frame; cache image names so each frame doesn't
+// open a process handle. PIDs can be reused, so entries expire quickly.
+const PROCESS_NAME_TTL_MS = 10_000;
+const processNameCache = new Map<number, { name: string; at: number }>();
+
 function processName(pid: number): string {
+    const now = Date.now();
+    const cached = processNameCache.get(pid);
+    if (cached && now - cached.at < PROCESS_NAME_TTL_MS) {
+        return cached.name;
+    }
+    const name = queryProcessName(pid);
+    if (name) {
+        if (processNameCache.size > 512) {
+            processNameCache.clear();
+        }
+        processNameCache.set(pid, { name, at: now });
+    }
+    // Lookup failures can be transient (e.g. a process still starting), so they are not cached.
+    return name ?? `pid-${pid}`;
+}
+
+function queryProcessName(pid: number): string | null {
     const handle = openProcess(0x1000, 0, pid); // PROCESS_QUERY_LIMITED_INFORMATION
     if (!handle) {
-        return `pid-${pid}`;
+        return null;
     }
     try {
         const buffer = Buffer.alloc(2048);
         const size = Buffer.alloc(4);
         size.writeUInt32LE(1024);
         if (!queryImageName(handle, 0, buffer, size)) {
-            return `pid-${pid}`;
+            return null;
         }
         return path.win32.basename(buffer.toString("utf16le", 0, size.readUInt32LE(0) * 2));
     }

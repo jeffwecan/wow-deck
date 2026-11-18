@@ -10,7 +10,7 @@ import streamDeck, {
 } from "@elgato/streamdeck";
 import type { KeyAction } from "@elgato/streamdeck";
 import { normalizeAction, type ActionSettings } from "../settings/action-settings.js";
-import { normalizeGrid, type GridSettings } from "../settings/global-grid-settings.js";
+import { normalizeGrid, sameGrid, type GridSettings } from "../settings/global-grid-settings.js";
 import { parseShortcut } from "../input/shortcut.js";
 import { listWindows, resolveWindow, windowDiscoveryStatus, foregroundWindowInfo } from "../capture/window-manager.js";
 import { CaptureManager } from "../capture/capture-manager.js";
@@ -30,6 +30,11 @@ export class WowAction extends SingletonAction<ActionSettings> {
     private pickTimer: ReturnType<typeof setTimeout> | null = null;
 
     setGrid(grid: GridSettings) {
+        if (sameGrid(this.grid, grid)) {
+            // Re-binding would flash every key with a status card and restart nothing useful.
+            this.sendInspector();
+            return;
+        }
         this.grid = grid;
         keyboard.releaseAll();
         this.statuses.clear();

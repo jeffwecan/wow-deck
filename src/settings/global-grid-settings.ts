@@ -28,6 +28,14 @@ export const DEFAULT_GRID: GridSettings = {
     captureInterval: 1000
 };
 
+/** True when both grids describe the same capture target and layout. */
+export function sameGrid(a: GridSettings | null, b: GridSettings | null): boolean {
+    if (!a || !b) {
+        return a === b;
+    }
+    return (Object.keys(DEFAULT_GRID) as (keyof GridSettings)[]).every(key => a[key] === b[key]);
+}
+
 const bounded = (v: unknown, min: number, max: number, fallback: number) =>
     typeof v === "number" && Number.isInteger(v) && v >= min && v <= max ? v : fallback;
 

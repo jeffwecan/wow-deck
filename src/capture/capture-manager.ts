@@ -1,7 +1,7 @@
-import { ScreenCapture, isSupported, type WindowInfo } from "@screen-capture/node";
+import { ScreenCapture, isSupported, type Frame, type WindowInfo } from "@screen-capture/node";
 import streamDeck from "@elgato/streamdeck";
 import type { GridSettings } from "../settings/global-grid-settings.js";
-import { normalizeGrid } from "../settings/global-grid-settings.js";
+import { normalizeGrid, sameGrid } from "../settings/global-grid-settings.js";
 import { clientBounds, isMinimized, resolveWindow } from "./window-manager.js";
 import {
     fallbackSvg,
@@ -23,6 +23,27 @@ type Subscriber = {
 };
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
+/**
+ * How long a capture session is kept alive after nothing needs frames any more.
+ *
+ * Starting or stopping a Windows Graphics Capture session on a fullscreen game makes the
+ * compositor switch how it presents that window, which shows up as a brief display-wide hitch.
+ * Profile switches (e.g. alt-tabbing out of the game with an app-linked profile), page changes
+ * and non-live button presses would otherwise stop and restart the session every time.
+ */
+export const IDLE_LINGER_MS = 20_000;
+
+function cropToRaw(frame: Frame, area: PixelRegion): RawFrame {
+    const cropped = frame.crop(area.left, area.top, area.left + area.width, area.top + area.height);
+    // Read the native pixels once, after reducing the full window to the requested area.
+    return {
+        buffer: cropped.buffer,
+        width: cropped.width,
+        height: cropped.height,
+        colorFormat: cropped.colorFormat
+    };
+}
+
 export class CaptureManager {
     private subscribers = new Map<string, Subscriber>();
     private grid: GridSettings = normalizeGrid(null);
@@ -32,10 +53,15 @@ export class CaptureManager {
     private generation = 0;
     private lastWarning = new Map<string, number>();
     private status = "Select a window";
-    private latest: { frame: RawFrame; client: ClientRect } | null = null;
+    private latest: { frame: Frame; client: ClientRect } | null = null;
     private latestImages = new Map<string, string>();
     private wakeInterval: (() => void) | null = null;
     private pendingSnapshots = new Set<string>();
+    private idleTimer: ReturnType<typeof setTimeout> | null = null;
+    private closed = false;
+
+    constructor(private readonly idleLingerMs = IDLE_LINGER_MS) {}
+
     get window() {
         return this.selected;
     }
@@ -60,23 +86,29 @@ export class CaptureManager {
     }
 
     setGrid(grid: GridSettings) {
+        if (sameGrid(this.grid, grid)) {
+            // Settings echoes (e.g. a host replying to getGlobalSettings) must not restart capture.
+            return;
+        }
         this.grid = grid;
-        this.latest = null;
-        this.latestImages.clear();
-        this.generation++;
-        this.wakeInterval?.();
-        void this.session?.stop().catch(() => {});
-        this.session = null;
+        this.restartSession();
         if (this.subscribers.size) {
             this.ensureRunning();
         }
     }
 
     subscribe(id: string, subscriber: Subscriber) {
+        this.cancelIdleStop();
         this.subscribers.set(id, subscriber);
         this.pendingSnapshots.add(id);
         void (async () => {
             try {
+                const cached = subscriber.live && this.latest ? this.latestImages.get(subscriber.position) : undefined;
+                if (cached) {
+                    // Returning during the idle grace period: show the last image, not a status card.
+                    await subscriber.update(cached, "Mirroring");
+                    return;
+                }
                 await subscriber.update(fallbackSvg(this.status), this.status);
                 if (this.subscribers.get(id) !== subscriber || !subscriber.live || !this.latest) {
                     return;
@@ -108,26 +140,86 @@ export class CaptureManager {
         if (!subscriber || subscriber.live) {
             return;
         }
+        this.cancelIdleStop();
+        if (this.session && this.latest) {
+            // A session is already running (live buttons or the idle grace period): its latest
+            // frame is at most one interval old, and still exact for a static window. Restarting
+            // the session here would interrupt every live button on each press.
+            void this.snapshotFromLatest(id, subscriber);
+            return;
+        }
         this.pendingSnapshots.add(id);
-        // Restart so a static window is captured immediately when pressed.
-        this.generation++;
-        void this.session?.stop().catch(() => {});
-        this.session = null;
         this.ensureRunning();
     }
 
     unsubscribe(id: string) {
         this.subscribers.delete(id);
         this.pendingSnapshots.delete(id);
-        if (!this.subscribers.size) {
-            this.generation++;
-            this.wakeInterval?.();
-            void this.session?.stop().catch(() => {});
-            this.session = null;
-            this.selected = null;
-            this.latest = null;
-            this.latestImages.clear();
+        this.scheduleIdleStop();
+    }
+
+    private async snapshotFromLatest(id: string, subscriber: Subscriber) {
+        try {
+            const { frame, client } = this.latest!;
+            const rect = sourceRegion(this.grid, subscriber.position, client, frame);
+            const image = rect
+                ? await renderCrop(cropToRaw(frame, rect), { left: 0, top: 0, width: rect.width, height: rect.height })
+                : fallbackSvg("Invalid cell");
+            if (this.subscribers.get(id) === subscriber) {
+                await subscriber.update(image, rect ? "Mirroring" : "Invalid cell");
+            }
         }
+        catch (error) {
+            this.warn(String(error));
+        }
+        finally {
+            this.scheduleIdleStop();
+        }
+    }
+
+    private hasDemand() {
+        return this.hasLiveSubscribers() || this.pendingSnapshots.size > 0;
+    }
+
+    /** Stops the session after {@link idleLingerMs} unless something needs frames again. */
+    private scheduleIdleStop() {
+        if (this.idleTimer || this.hasDemand()) {
+            return;
+        }
+        if (!this.running || this.closed) {
+            this.stopSession();
+            return;
+        }
+        this.idleTimer = setTimeout(() => {
+            this.idleTimer = null;
+            if (!this.hasDemand()) {
+                this.stopSession();
+            }
+        }, this.idleLingerMs);
+        this.idleTimer.unref?.();
+    }
+
+    private cancelIdleStop() {
+        if (this.idleTimer) {
+            clearTimeout(this.idleTimer);
+            this.idleTimer = null;
+        }
+    }
+
+    /** Ends the current session; the capture loop exits once nothing needs frames. */
+    private stopSession() {
+        this.cancelIdleStop();
+        this.restartSession();
+        this.selected = null;
+    }
+
+    private restartSession() {
+        this.latest = null;
+        this.latestImages.clear();
+        this.generation++;
+        this.wakeInterval?.();
+        void this.session?.stop().catch(() => {});
+        this.session = null;
     }
 
     private ensureRunning() {
@@ -142,7 +234,8 @@ export class CaptureManager {
     }
 
     private shouldCapture() {
-        return this.hasLiveSubscribers() || this.pendingSnapshots.size > 0;
+        // Keep the loop (and its session) alive through the idle grace period.
+        return this.hasDemand() || this.idleTimer !== null;
     }
 
     private warn(message: string) {
@@ -161,7 +254,7 @@ export class CaptureManager {
 
     private waitForInterval(started: number, token: number) {
         const remaining = this.grid.captureInterval - (performance.now() - started);
-        if (remaining <= 0 || token !== this.generation || !this.subscribers.size) {
+        if (remaining <= 0 || token !== this.generation || !this.shouldCapture()) {
             return Promise.resolve();
         }
         return new Promise<void>((resolve) => {
@@ -269,17 +362,7 @@ export class CaptureManager {
                         valid.set(pos, rect);
                     }
                     const area = boundingRegion(valid.values());
-                    let cellFrame: RawFrame | null = null;
-                    if (area) {
-                        const cropped = frame.crop(area.left, area.top, area.left + area.width, area.top + area.height);
-                        // Read the native pixels once, after reducing the full window to its mapped cells.
-                        cellFrame = {
-                            buffer: cropped.buffer,
-                            width: cropped.width,
-                            height: cropped.height,
-                            colorFormat: cropped.colorFormat
-                        };
-                    }
+                    const cellFrame = area ? cropToRaw(frame, area) : null;
                     for (const [pos, rect] of valid) {
                         const local = regionWithin(rect, area!);
                         const hash = regionHash(cellFrame!, local);
@@ -305,9 +388,9 @@ export class CaptureManager {
                             this.pendingSnapshots.delete(id);
                         }
                     }
-                    if (!this.hasLiveSubscribers()) {
-                        break;
-                    }
+                    // With only non-live buttons left this starts the grace period; the loop
+                    // condition ends the session once it expires.
+                    this.scheduleIdleStop();
                     await this.waitForInterval(processedAt, token);
                 }
             }
@@ -341,7 +424,11 @@ export class CaptureManager {
     }
 
     async shutdown() {
+        // Terminal: stops a loop that is mid-frame from re-arming the idle grace period.
+        this.closed = true;
+        this.cancelIdleStop();
         this.subscribers.clear();
+        this.pendingSnapshots.clear();
         this.generation++;
         this.wakeInterval?.();
         await this.session?.stop().catch(() => {});
