@@ -18,7 +18,7 @@ let socket;
 let uuid;
 let action;
 let settings = { slot: 0, shortcut: "" };
-let deckSettings = { wowFolder: "", character: "" };
+let deckSettings = { wowFolder: "", character: "", live: true, liveInterval: 200 };
 
 function send(event, payload) {
     if (socket?.readyState !== 1) {
@@ -75,6 +75,9 @@ function saveSettings() {
 
 function drawState(state) {
     setStatus(state.status || "");
+    if (state.liveStatus) {
+        $("liveStatus").textContent = `Live state: ${state.liveStatus}`;
+    }
     if (Array.isArray(state.bars) && state.bars.length && JSON.stringify(state.bars) !== JSON.stringify(bars)) {
         bars = state.bars;
         drawSlotPicker();
@@ -116,12 +119,19 @@ $("bar").onchange = () => {
 $("button").onchange = saveSettings;
 $("shortcut").onchange = saveSettings;
 $("saveDeck").onclick = () => {
-    deckSettings = { wowFolder: $("wowFolder").value.trim(), character: $("character").value };
+    deckSettings = {
+        wowFolder: $("wowFolder").value.trim(),
+        character: $("character").value,
+        live: !!$("live").checked,
+        liveInterval: Number($("liveInterval").value) || 200
+    };
     if (send("setGlobalSettings", deckSettings)) {
         setStatus("Saved; reloading the export…");
     }
 };
 $("character").onchange = () => $("saveDeck").onclick();
+$("live").onchange = () => $("saveDeck").onclick();
+$("liveInterval").onchange = () => $("saveDeck").onclick();
 $("refresh").onclick = () => {
     if (send("sendToPlugin", { type: "refresh" })) {
         setStatus("Reloading the export…");
@@ -145,6 +155,8 @@ window.connectElgatoStreamDeckSocket = (port, pluginUuid, registerEvent, _info, 
         if (message.event === "didReceiveGlobalSettings") {
             deckSettings = { ...deckSettings, ...message.payload?.settings };
             $("wowFolder").value = deckSettings.wowFolder || "";
+            $("live").checked = deckSettings.live !== false;
+            $("liveInterval").value = String(deckSettings.liveInterval || 200);
         }
         if (message.event === "didReceiveSettings") {
             settings = { ...settings, ...message.payload?.settings };

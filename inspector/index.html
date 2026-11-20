@@ -83,6 +83,21 @@
     <label for="character">Character</label>
     <select id="character"></select>
 
+    <h2>Live state</h2>
+    <label><input id="live" type="checkbox" style="width:auto"> Show cooldowns, range and usability</label>
+    <small>Reads the small strip the WowDeck addon draws in the top-left corner of the game (/wowdeck beacon toggles it).</small>
+    <label for="liveInterval">Update every</label>
+    <select id="liveInterval">
+        <option value="100">100 ms</option>
+        <option value="150">150 ms</option>
+        <option value="200">200 ms</option>
+        <option value="250">250 ms</option>
+        <option value="500">500 ms</option>
+        <option value="1000">1 s</option>
+    </select>
+    <div id="liveStatus" class="box">Live state: waiting…</div>
+
+    <h2>WoW folder</h2>
     <label for="wowFolder">WoW folder (optional)</label>
     <input id="wowFolder" placeholder="Detected automatically">
     <small>Only needed if WoW is installed somewhere unusual, e.g. D:\Games\World of Warcraft\_retail_.</small>

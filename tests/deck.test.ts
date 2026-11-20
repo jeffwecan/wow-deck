@@ -159,7 +159,11 @@ describe("settings", () => {
         expect(normalizeAction({ slot: 168 }).slot).toBe(168);
         expect(normalizeAction({ slot: 181 }).slot).toBe(0);
         expect(normalizeAction({ slot: "7" }).slot).toBe(7);
-        expect(normalizeDeckSettings({ wowFolder: "  D:\\WoW  ", windowProcess: "x" })).toEqual({ wowFolder: "D:\\WoW", character: "" });
+        expect(normalizeDeckSettings({ wowFolder: "  D:\\WoW  ", windowProcess: "x" })).toEqual({
+            wowFolder: "D:\\WoW", character: "", live: true, liveInterval: 200
+        });
+        expect(normalizeDeckSettings({ live: false, liveInterval: 100 })).toMatchObject({ live: false, liveInterval: 100 });
+        expect(normalizeDeckSettings({ liveInterval: 7 }).liveInterval).toBe(200);
         expect(describeSlot(63)).toBe("Bottom left bar, button 3");
         expect(describeSlot(0)).toBe("No slot chosen");
     });

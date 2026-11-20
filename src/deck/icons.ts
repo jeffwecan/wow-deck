@@ -47,6 +47,7 @@ export function iconSources(slot: SlotInfo): Source[] {
 export class IconResolver {
     private pending = new Map<Source, Promise<Buffer | null>>();
     private failedAt = new Map<Source, number>();
+    private memory = new Map<Source, Buffer>();
 
     constructor(
         private readonly cacheDir: string,
@@ -78,9 +79,16 @@ export class IconResolver {
     }
 
     private async load(source: Source): Promise<Buffer | null> {
+        // Keys redraw often with live state, so keep icons in memory once loaded.
+        const remembered = this.memory.get(source);
+        if (remembered) {
+            return remembered;
+        }
         const file = path.join(this.cacheDir, `${source}.jpg`);
         try {
-            return await readFile(file);
+            const image = await readFile(file);
+            this.memory.set(source, image);
+            return image;
         }
         catch {
             // not cached yet
@@ -92,6 +100,7 @@ export class IconResolver {
             await mkdir(this.cacheDir, { recursive: true });
             await writeFile(file, image);
             this.failedAt.delete(source);
+            this.memory.set(source, image);
             return image;
         }
         catch {
