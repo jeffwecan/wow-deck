@@ -13,7 +13,8 @@
     "validate": "npm run build && streamdeck validate com.wow-deck.sdPlugin --no-update-check",
     "pack": "npm run build && streamdeck pack com.wow-deck.sdPlugin --output dist --force --no-file-list --no-update-check",
     "link": "npm run build && streamdeck link com.wow-deck.sdPlugin",
-    "restart": "streamdeck restart com.wow-deck"
+    "restart": "streamdeck restart com.wow-deck",
+    "make-pages": "esbuild src/tools/make-pages.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/wow-deck/make-pages.mjs --log-level=warning && node node_modules/.cache/wow-deck/make-pages.mjs"
   },
   "dependencies": {
     "@elgato/streamdeck": "^3.0.3",
