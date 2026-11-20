@@ -10,9 +10,9 @@ catch (error) {
         private sendError() {
             void streamDeck.ui.sendToPropertyInspector({
                 type: "state",
-                status: "Native module unavailable",
-                windowDiagnostic: "The plugin could not start its Windows modules. Check Stream Deck plugin logs.",
-                windows: []
+                status: "The plugin could not start its Windows modules. Check the plugin logs.",
+                characters: [],
+                slot: null
             });
         }
 

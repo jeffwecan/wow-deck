@@ -1,7 +1,6 @@
 import koffi from "koffi";
 import { parseShortcut, type Shortcut } from "./shortcut.js";
-import { isForeground } from "../capture/window-manager.js";
-import type { WindowInfo } from "@screen-capture/node";
+import { isWowForeground } from "./foreground.js";
 
 // INPUT/KEYBDINPUT layout for 64-bit Windows. N-API is used by Koffi; no
 // Node-version-specific addon is required, but only win32 x64 is packaged.
@@ -41,8 +40,8 @@ export class KeyboardManager {
         }
     }
 
-    press(id: string, text: string, window: WindowInfo | null): boolean {
-        if (this.held.has(id) || !window || !isForeground(window)) {
+    press(id: string, text: string): boolean {
+        if (this.held.has(id) || !isWowForeground()) {
             return false;
         }
         const shortcut = parseShortcut(text);

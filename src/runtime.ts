@@ -1,21 +1,29 @@
 import streamDeck from "@elgato/streamdeck";
-import { WowAction, keyboard, capture } from "./actions/wow-action.js";
-import { normalizeGrid } from "./settings/global-grid-settings.js";
-import { enablePhysicalPixels } from "./capture/window-manager.js";
+import { WowAction, beacon, deck, keyboard } from "./actions/wow-action.js";
+import { normalizeDeckSettings, type DeckSettings } from "./settings/deck-settings.js";
+import { enablePhysicalPixels } from "./input/foreground.js";
 
+// Window positions must be in physical pixels to line up with the captured screen.
 enablePhysicalPixels();
 const action = new WowAction();
 streamDeck.actions.registerAction(action);
-streamDeck.settings.onDidReceiveGlobalSettings(ev => action.setGrid(normalizeGrid(ev.settings)));
+
+function apply(settings: DeckSettings) {
+    deck.configure(settings);
+    beacon.configure(settings.live, settings.liveInterval);
+    action.setLiveEnabled(settings.live);
+}
+
+streamDeck.settings.onDidReceiveGlobalSettings(ev => apply(normalizeDeckSettings(ev.settings)));
 streamDeck.devices.onDeviceDidDisconnect(() => keyboard.releaseAll());
-process.on("SIGINT", () => {
+const shutdown = () => {
     keyboard.releaseAll();
-    void capture.shutdown();
-});
-process.on("SIGTERM", () => {
-    keyboard.releaseAll();
-    void capture.shutdown();
-});
+    deck.stop();
+    beacon.shutdown();
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 process.on("exit", () => keyboard.releaseAll());
 await streamDeck.connect();
-action.setGrid(normalizeGrid(await streamDeck.settings.getGlobalSettings()));
+apply(normalizeDeckSettings(await streamDeck.settings.getGlobalSettings()));
+deck.start();

@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: WowDeck
+## Notes: Shares your action bar layout and keybindings with the WoW-Deck Stream Deck / StreamDock plugin.
+## Author: WoW-Deck
+## Version: 1.0.0
+## SavedVariables: WowDeckDB
+
+WowDeck.lua
